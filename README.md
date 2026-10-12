@@ -31,21 +31,10 @@ This app is made for Xbox consoles in **Developer Mode**, which is how Xbox lets
 - **Debrid services (recommended):** set up your addon (e.g. Torrentio, AIOStreams) with Real-Debrid, AllDebrid, TorBox or similar. Those give direct video links, which play straight away with no extra setup.
 - **Torrents** need a Stremio streaming server, which the Xbox can't run itself. Run Stremio on a PC on the same network, then in the app go to **Settings → Streaming** and add your PC's address, e.g. `http://192.168.1.10:11470`. Leave the default address (`http://127.0.0.1:11470`) selected if you only use debrid.
 
-## Controller
-| Button | Action |
-| --- | --- |
-| D-pad | Move the highlight. In the player: left/right seeks, up/down changes volume |
-| Left stick | Move the cursor |
-| A | Select. On a text box (e.g. email, password) it opens the on-screen keyboard |
-| B | Close the open menu, otherwise go back one screen (from the player: to the stream list) |
-| X | Play / pause in the player |
 
 ## Troubleshooting
 The app writes a log you can download from the Device Portal: **File explorer → LocalAppData →** the folder starting with `311105be-` **→ LocalState → `stremio-vlc.log`**. Include it when reporting a problem.
 
-Known limitations:
-- Subtitle size and colour settings only affect addon subtitles; subtitles built into the video file use VLC's default style.
-- Streaming services that need browser DRM won't play.
 
 ## How it works
 - web.stremio.com runs in a WebView2. When it runs inside a native app, Stremio sends its playback commands to the app; this is the same protocol the official Windows app uses with mpv. The app answers them with LibVLC (`Stremio/Shell/ShellHost.cs`, `Stremio/Playback/VlcShellPlayer.cs`).
