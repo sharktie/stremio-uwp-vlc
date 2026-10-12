@@ -54,7 +54,7 @@ Known limitations:
 - The controller is translated into the keyboard navigation Stremio already supports (`Stremio/Input/ControllerBridge.cs`).
 
 ## Building
-Every push builds a signed package with GitHub Actions (`.github/workflows/build.yml`), and pushing a tag such as `v1.3.0` publishes a release. To build locally you need Visual Studio with the **Universal Windows Platform development** workload, then open `StremioUWP.sln` and build `Release | x64`.
+Every push builds a signed package with GitHub Actions (`.github/workflows/build.yml`), and pushing a tag such as `v1.4.0` publishes a release. To build locally you need Visual Studio with the **Universal Windows Platform development** workload, then open `StremioUWP.sln` and build `Release | x64`.
 
 ## Credits and license
 - Based on [Stremio-UWP](https://github.com/Misunderstood-Wookiee/Stremio-UWP) by Misunderstood-Wookiee.
