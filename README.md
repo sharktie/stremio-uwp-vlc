@@ -12,6 +12,7 @@ Stremio for **Xbox Developer Mode** with **VLC built in**. Streams that fail in 
 - Watch progress is saved, and next-episode works.
 - If a stream's connection drops partway through, playback reconnects and carries on.
 - Full controller support on Xbox, including typing your email and password with the on-screen keyboard.
+- subtitles work yipee
 
 ## Install on Xbox
 This app is made for Xbox consoles in **Developer Mode**, which is how Xbox lets you install apps from outside the Store.
@@ -42,8 +43,6 @@ The app writes a log you can download from the Device Portal: **File explorer â†
 - The app downloads https streams with Windows' own HTTP stack and feeds them to VLC (`Stremio/Playback/HttpMediaInput.cs`), and it answers Stremio's streaming server checks for direct links itself (`Stremio/Shell/BuiltInStreamingServer.cs`).
 - The controller is translated into the keyboard navigation Stremio already supports (`Stremio/Input/ControllerBridge.cs`).
 
-## Building
-Every push builds a signed package with GitHub Actions (`.github/workflows/build.yml`), and pushing a tag such as `v1.4.0` publishes a release. To build locally you need Visual Studio with the **Universal Windows Platform development** workload, then open `StremioUWP.sln` and build `Release | x64`.
 
 ## Credits and license
 - Based on [Stremio-UWP](https://github.com/Misunderstood-Wookiee/Stremio-UWP) by Misunderstood-Wookiee.
