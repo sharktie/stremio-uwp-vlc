@@ -23,6 +23,19 @@ namespace Stremio.Input
         public string Value { get; }
     }
 
+    /// <summary>What the user typed, and whether they finished with the keyboard's Enter key.</summary>
+    internal sealed class TextEntryResult
+    {
+        public TextEntryResult(string text, bool submitted)
+        {
+            Text = text;
+            Submitted = submitted;
+        }
+
+        public string Text { get; }
+        public bool Submitted { get; }
+    }
+
     /// <summary>
     /// Drives web.stremio.com with a controller by turning it into keyboard input. stremio-web
     /// already supports the keyboard everywhere (its spatial-navigation polyfill moves focus with
@@ -129,9 +142,11 @@ namespace Stremio.Input
         (el ? el.tagName + (typeof el.className === 'string' && el.className ? '.' + el.className.split(' ')[0] : '') : 'none');
 })()";
         private const int DiagnosticPresses = 5;
+        private const int MaxChainedTextBoxes = 3;
+        private static readonly TimeSpan ChainedTextBoxDelay = TimeSpan.FromMilliseconds(250);
 
         private readonly CoreWebView2 _webView;
-        private readonly Func<TextEntryRequest, Task<string>> _requestText;
+        private readonly Func<TextEntryRequest, Task<TextEntryResult>> _requestText;
         private readonly Action _ensureFocus;
         private readonly DispatcherTimer _timer = new DispatcherTimer();
         private GamepadButtons _previousButtons;
@@ -141,7 +156,7 @@ namespace Stremio.Input
         private int _loggedPresses;
 
         /// <param name="ensureFocus">Gives the web view keyboard focus if something else has it.</param>
-        public ControllerBridge(CoreWebView2 webView, Func<TextEntryRequest, Task<string>> requestText, Action ensureFocus)
+        public ControllerBridge(CoreWebView2 webView, Func<TextEntryRequest, Task<TextEntryResult>> requestText, Action ensureFocus)
         {
             _webView = webView;
             _requestText = requestText;
@@ -229,19 +244,34 @@ namespace Stremio.Input
             try
             {
                 var state = await GetPageStateAsync();
-                if (state != null && state.GetNamedBoolean("editable", false))
+                var boxes = 0;
+                while (state != null && state.GetNamedBoolean("editable", false) && boxes < MaxChainedTextBoxes)
                 {
-                    var text = await _requestText(new TextEntryRequest(
+                    boxes++;
+                    var result = await _requestText(new TextEntryRequest(
                         state.GetNamedString("label", string.Empty),
                         state.GetNamedString("type", "text"),
                         state.GetNamedString("value", string.Empty)));
-                    if (text != null)
+                    if (result == null)
                     {
-                        await _webView.ExecuteScriptAsync(SetTextScript.Replace("VALUE", JsonValue.CreateStringValue(text).Stringify()));
+                        return;
                     }
-                    return;
+                    await _webView.ExecuteScriptAsync(SetTextScript.Replace("VALUE", JsonValue.CreateStringValue(result.Text).Stringify()));
+                    if (!result.Submitted)
+                    {
+                        return;
+                    }
+                    // Finished with the keyboard's Enter: press Enter in the page too, like a real
+                    // keyboard. On the sign-in form that moves to the password box (then signs in),
+                    // so open the keyboard again if a text box now has focus.
+                    await PressAsync(Enter);
+                    await Task.Delay(ChainedTextBoxDelay);
+                    state = await GetPageStateAsync();
                 }
-                await PressAsync(Enter);
+                if (boxes == 0)
+                {
+                    await PressAsync(Enter);
+                }
             }
             catch (Exception ex)
             {

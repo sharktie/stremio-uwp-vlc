@@ -183,7 +183,7 @@ namespace Stremio
 
         // Lets the user type into a text box in the page with the console's on-screen keyboard,
         // which reliably works with a XAML text box.
-        private async Task<string> RequestTextAsync(TextEntryRequest request)
+        private async Task<TextEntryResult> RequestTextAsync(TextEntryRequest request)
         {
             var isPassword = request.Type == "password";
             var passwordBox = new PasswordBox();
@@ -204,37 +204,51 @@ namespace Stremio
                 CloseButtonText = "Cancel",
                 DefaultButton = ContentDialogButton.Primary,
             };
-            var confirmed = false;
-            // Accepting the on-screen keyboard sends Enter: treat that as OK.
+            var submitted = false;
+            // Accepting the on-screen keyboard sends Enter: treat that as OK, and let the page
+            // move on to its next box (see ControllerBridge).
             input.KeyDown += (s, e) =>
             {
                 if (e.Key == VirtualKey.Enter)
                 {
                     e.Handled = true;
-                    confirmed = true;
+                    submitted = true;
                     dialog.Hide();
                 }
             };
-            dialog.Opened += (s, e) =>
+            // Ask for the keyboard whenever the box gets focus, and again shortly after the dialog
+            // opens: a password box isn't always ready for it straight away.
+            input.GotFocus += (s, e) => ShowOnScreenKeyboard();
+            dialog.Opened += async (s, e) =>
             {
-                input.Focus(FocusState.Programmatic);
-                try
+                input.Focus(FocusState.Keyboard);
+                await Task.Delay(TimeSpan.FromMilliseconds(200));
+                if (input.FocusState == FocusState.Unfocused)
                 {
-                    InputPane.GetForCurrentView().TryShow();
+                    input.Focus(FocusState.Keyboard);
                 }
-                catch (Exception ex)
-                {
-                    Log.Error("Showing the on-screen keyboard failed", ex);
-                }
+                ShowOnScreenKeyboard();
             };
 
             var result = await dialog.ShowAsync();
             WebView.Focus(FocusState.Programmatic);
-            if (result != ContentDialogResult.Primary && !confirmed)
+            if (result != ContentDialogResult.Primary && !submitted)
             {
                 return null;
             }
-            return isPassword ? passwordBox.Password : textBox.Text;
+            return new TextEntryResult(isPassword ? passwordBox.Password : textBox.Text, submitted);
+        }
+
+        private static void ShowOnScreenKeyboard()
+        {
+            try
+            {
+                InputPane.GetForCurrentView().TryShow();
+            }
+            catch (Exception ex)
+            {
+                Log.Error("Showing the on-screen keyboard failed", ex);
+            }
         }
 
         private void OnPreviewKeyDown(object sender, KeyRoutedEventArgs e)
