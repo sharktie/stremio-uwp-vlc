@@ -68,6 +68,13 @@ namespace Stremio.Shell
                 {
                     return;
                 }
+                // Diagnostics from the page scripts (e.g. XboxNavigationScript).
+                var pageLog = message.GetNamedValue("uwpLog", JsonValue.CreateNullValue());
+                if (pageLog.ValueType == JsonValueType.String)
+                {
+                    Log.Write("Page: " + pageLog.GetString());
+                    return;
+                }
                 var args = message.GetNamedValue("args", JsonValue.CreateNullValue());
                 if (args.ValueType != JsonValueType.Array || args.GetArray().Count == 0)
                 {

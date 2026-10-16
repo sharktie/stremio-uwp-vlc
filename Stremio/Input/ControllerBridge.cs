@@ -114,6 +114,20 @@ namespace Stremio.Input
     var DIRECTIONS = { ArrowUp: 'up', ArrowDown: 'down', ArrowLeft: 'left', ArrowRight: 'right' };
     var SIDEBAR = '[class*=""vertical-nav-bar""]';
     var lastContent = null;
+    var reports = 0;
+
+    // The first moves go to the app's log (stremio-vlc.log), to diagnose navigation on the console.
+    function describe(el) {
+        if (!el) return 'nothing';
+        var r = el.getBoundingClientRect();
+        return el.tagName + '.' + String(el.className).split(' ')[0] + ' ' + (el.getAttribute('href') || el.getAttribute('title') || (el.textContent || '').trim().slice(0, 24)) +
+            ' @' + [Math.round(r.left), Math.round(r.top), Math.round(r.width), Math.round(r.height)].join(',');
+    }
+    function report(text) {
+        if (reports >= 40) return;
+        reports++;
+        try { window.chrome.webview.postMessage(JSON.stringify({ uwpLog: text })); } catch (e) {}
+    }
 
     function inPlayer() { return location.hash.indexOf('#/player') === 0; }
     function isText(el) { return !!el && (el.tagName === 'TEXTAREA' || (el.tagName === 'INPUT' && TEXT.test(el.type || 'text'))); }
@@ -215,8 +229,24 @@ namespace Stremio.Input
         // Back out of the sidebar to the card you left.
         if (dir === 'right' && from.closest(SIDEBAR) && lastContent && root.contains(lastContent) && usable(lastContent) && inView(lastContent)) next = lastContent;
         if (!next) next = findNext(from, dir, list);
+        var detail = '';
+        if (!next && dir === 'left') {
+            var side = document.querySelectorAll(SIDEBAR + ' a');
+            detail = ' (sidebar links: ' + side.length + ', usable: ' + list.filter(function (el) { return !!el.closest(SIDEBAR); }).length +
+                ', first: ' + describe(side[0]) + ', viewport ' + window.innerWidth + 'x' + window.innerHeight + ')';
+        }
+        report(dir + ': ' + describe(from) + ' -> ' + describe(next) + detail);
         if (next) focusOn(next, true);
     }
+
+    // Y on the controller: highlight the search box (ControllerBridge then opens the keyboard). Pages
+    // without one go to Stremio's search page first.
+    window.__uwpGoToSearch = function () {
+        var input = document.querySelector('[class*=""search-bar""] input, input[class*=""search-input""]');
+        if (input && usable(input)) { focusOn(input, true); return 'found'; }
+        location.hash = '#/search';
+        return 'navigated';
+    };
 
     window.addEventListener('keydown', function (e) {
         var dir = DIRECTIONS[e.key];
@@ -341,6 +371,7 @@ namespace Stremio.Input
         private const int DiagnosticPresses = 5;
         private const int MaxChainedTextBoxes = 3;
         private static readonly TimeSpan ChainedTextBoxDelay = TimeSpan.FromMilliseconds(250);
+        private static readonly TimeSpan SearchPageDelay = TimeSpan.FromMilliseconds(800);
 
         private readonly CoreWebView2 _webView;
         private readonly Func<TextEntryRequest, Task<TextEntryResult>> _requestText;
@@ -443,7 +474,7 @@ namespace Stremio.Input
             }
             else if ((pressed & GamepadButtons.Y) != 0)
             {
-                OnPlayerKey(SubtitlesMenuKey);
+                OnY();
             }
             else if ((pressed & GamepadButtons.Menu) != 0)
             {
@@ -462,42 +493,7 @@ namespace Stremio.Input
             _busy = true;
             try
             {
-                var state = await GetPageStateAsync();
-                var boxes = 0;
-                while (state != null && state.GetNamedBoolean("editable", false) && boxes < MaxChainedTextBoxes)
-                {
-                    boxes++;
-                    var result = await _requestText(new TextEntryRequest(
-                        state.GetNamedString("label", string.Empty),
-                        state.GetNamedString("type", "text"),
-                        state.GetNamedString("value", string.Empty)));
-                    if (result == null)
-                    {
-                        return;
-                    }
-                    await _webView.ExecuteScriptAsync(SetTextScript.Replace("VALUE", JsonValue.CreateStringValue(result.Text).Stringify()));
-                    if (!result.Submitted)
-                    {
-                        return;
-                    }
-                    // Finished with the keyboard's Enter: press Enter in the page too, like a real
-                    // keyboard. On the sign-in form that moves to the password box (then signs in),
-                    // so open the keyboard again if a text box now has focus.
-                    await PressAsync(Enter);
-                    await Task.Delay(ChainedTextBoxDelay);
-                    state = await GetPageStateAsync();
-                }
-                if (boxes == 0 && !cursorOn)
-                {
-                    if (state != null && state.GetNamedBoolean("needsClick", false))
-                    {
-                        await _webView.ExecuteScriptAsync(ClickTargetScript);
-                    }
-                    else
-                    {
-                        await PressAsync(Enter);
-                    }
-                }
+                await SelectAsync(cursorOn);
             }
             catch (Exception ex)
             {
@@ -506,6 +502,79 @@ namespace Stremio.Input
             finally
             {
                 _busy = false;
+            }
+        }
+
+        // Y: in the player the subtitles menu; elsewhere the search box, with the keyboard open.
+        private async void OnY()
+        {
+            _busy = true;
+            try
+            {
+                var state = await GetPageStateAsync();
+                if (state != null && state.GetNamedBoolean("player", false))
+                {
+                    await PressAsync(SubtitlesMenuKey);
+                    return;
+                }
+                var result = await _webView.ExecuteScriptAsync("window.__uwpGoToSearch ? window.__uwpGoToSearch() : ''");
+                if (result.Contains("navigated"))
+                {
+                    await Task.Delay(SearchPageDelay);
+                    result = await _webView.ExecuteScriptAsync("window.__uwpGoToSearch ? window.__uwpGoToSearch() : ''");
+                }
+                if (result.Contains("found"))
+                {
+                    await SelectAsync(false);
+                }
+            }
+            catch (Exception ex)
+            {
+                Log.Error("Controller search failed", ex);
+            }
+            finally
+            {
+                _busy = false;
+            }
+        }
+
+        private async Task SelectAsync(bool cursorOn)
+        {
+            var state = await GetPageStateAsync();
+            var boxes = 0;
+            while (state != null && state.GetNamedBoolean("editable", false) && boxes < MaxChainedTextBoxes)
+            {
+                boxes++;
+                var result = await _requestText(new TextEntryRequest(
+                    state.GetNamedString("label", string.Empty),
+                    state.GetNamedString("type", "text"),
+                    state.GetNamedString("value", string.Empty)));
+                if (result == null)
+                {
+                    return;
+                }
+                await _webView.ExecuteScriptAsync(SetTextScript.Replace("VALUE", JsonValue.CreateStringValue(result.Text).Stringify()));
+                if (!result.Submitted)
+                {
+                    return;
+                }
+                // Finished with the keyboard's Enter: press Enter in the page too, like a real
+                // keyboard. On the sign-in form that moves to the password box (then signs in),
+                // so open the keyboard again if a text box now has focus.
+                await PressAsync(Enter);
+                await Task.Delay(ChainedTextBoxDelay);
+                state = await GetPageStateAsync();
+            }
+            if (boxes == 0 && !cursorOn)
+            {
+                if (state != null && state.GetNamedBoolean("needsClick", false))
+                {
+                    await _webView.ExecuteScriptAsync(ClickTargetScript);
+                }
+                else
+                {
+                    await PressAsync(Enter);
+                }
             }
         }
 
