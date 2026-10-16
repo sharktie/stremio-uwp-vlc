@@ -24,6 +24,12 @@
         <!-- The controller drives the page as a keyboard (see ControllerBridge). -->
         <controls:WebView2 x:Name="WebView" />
 
+        <Border x:Name="ToastPanel" Visibility="Collapsed" IsHitTestVisible="False"
+                HorizontalAlignment="Center" VerticalAlignment="Bottom" Margin="24,0,24,72"
+                Padding="20,12" CornerRadius="8" Background="#E6181624">
+            <TextBlock x:Name="ToastText" Foreground="White" FontSize="20" TextWrapping="Wrap" MaxWidth="760" />
+        </Border>
+
         <Grid x:Name="LoadErrorPanel" Background="#FF0C0B11" Visibility="Collapsed">
             <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center" MaxWidth="560" Padding="24" Spacing="16">
                 <TextBlock Text="Couldn't load Stremio" FontSize="28" Foreground="White" HorizontalAlignment="Center" />

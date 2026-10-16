@@ -79,11 +79,31 @@ namespace Stremio.Input
     ['mousedown', 'mouseup', 'auxclick'].forEach(function (type) {
         window.addEventListener(type, function (e) { if (e.button === 3 || e.button === 4) block(e); }, true);
     });
+    // The browser also turns the controller into a pointer (left stick moves it, A clicks) that a
+    // page can't switch off. Unless the user turned the cursor on (View button), hide it and drop
+    // its input before Stremio sees it, so A doesn't also click whatever is under it. Clicks from
+    // code (el.click()) aren't trusted and clicks from Enter on a link have detail 0; both still work.
+    document.documentElement.classList.add('uwp-no-pointer');
+    ['pointerdown', 'pointerup', 'pointermove', 'mousedown', 'mouseup', 'mousemove',
+        'click', 'dblclick', 'auxclick', 'contextmenu', 'wheel'].forEach(function (type) {
+        window.addEventListener(type, function (e) {
+            if (!e.isTrusted || !document.documentElement.classList.contains('uwp-no-pointer')) return;
+            if (type === 'click' && e.detail === 0) return;
+            block(e);
+        }, { capture: true, passive: false });
+    });
     var style = document.createElement('style');
     style.textContent = '[class*=""horizontal-nav-bar""] [class*=""buttons-container""] > [class*=""button-container""]' +
-        ':not([class*=""menu-button-container""]):not([class*=""back-button-container""]) { visibility: hidden !important; }';
+        ':not([class*=""menu-button-container""]):not([class*=""back-button-container""]) { visibility: hidden !important; }' +
+        ' html.uwp-no-pointer, html.uwp-no-pointer * { cursor: none !important; }';
     (document.head || document.documentElement).appendChild(style);
 })();";
+
+        /// <summary>Script that turns the page's handling of the console's cursor on or off.</summary>
+        public static string SetPagePointerScript(bool enabled)
+        {
+            return "document.documentElement.classList.toggle('uwp-no-pointer', " + (enabled ? "false" : "true") + ");";
+        }
 
         private const string AllowEscapeScript = "window.__uwpAllowEscape = Date.now();";
 
@@ -127,6 +147,7 @@ namespace Stremio.Input
         private static readonly TimeSpan PollInterval = TimeSpan.FromMilliseconds(30);
         private static readonly TimeSpan FirstRepeatDelay = TimeSpan.FromMilliseconds(400);
         private static readonly TimeSpan RepeatInterval = TimeSpan.FromMilliseconds(110);
+        private const double StickThreshold = 0.6;
 
         private static readonly Key ArrowUp = new Key("ArrowUp", "ArrowUp", 38, null);
         private static readonly Key ArrowDown = new Key("ArrowDown", "ArrowDown", 40, null);
@@ -170,6 +191,15 @@ namespace Stremio.Input
 
         /// <summary>While true the controller is left to XAML, e.g. for the load error screen.</summary>
         public bool Paused { get; set; }
+
+        /// <summary>
+        /// Whether the left stick moves the highlight like the D-pad. Off while the console's cursor
+        /// is on, because the stick then moves the cursor.
+        /// </summary>
+        public bool StickMovesHighlight { get; set; } = true;
+
+        /// <summary>Raised on the UI thread when the View button is pressed.</summary>
+        public event Action ViewPressed;
 
         public void Dispose()
         {
@@ -225,7 +255,7 @@ namespace Stremio.Input
 
             if ((pressed & GamepadButtons.A) != 0)
             {
-                OnSelect();
+                OnSelect(!StickMovesHighlight);
             }
             else if ((pressed & GamepadButtons.B) != 0)
             {
@@ -235,10 +265,15 @@ namespace Stremio.Input
             {
                 OnPlayPause();
             }
+            else if ((pressed & GamepadButtons.View) != 0)
+            {
+                ViewPressed?.Invoke();
+            }
         }
 
-        // A: activate the focused element, or type into a focused text box.
-        private async void OnSelect()
+        // A: activate the focused element, or type into a focused text box. With the console's cursor
+        // on, A already clicks under the cursor, so only the text box part applies.
+        private async void OnSelect(bool cursorOn)
         {
             _busy = true;
             try
@@ -268,7 +303,7 @@ namespace Stremio.Input
                     await Task.Delay(ChainedTextBoxDelay);
                     state = await GetPageStateAsync();
                 }
-                if (boxes == 0)
+                if (boxes == 0 && !cursorOn)
                 {
                     await PressAsync(Enter);
                 }
@@ -372,7 +407,7 @@ namespace Stremio.Input
             return JsonObject.TryParse(result, out state) ? state : null;
         }
 
-        private static void ReadControllers(out GamepadButtons buttons, out Key direction)
+        private void ReadControllers(out GamepadButtons buttons, out Key direction)
         {
             buttons = GamepadButtons.None;
             direction = null;
@@ -382,19 +417,32 @@ namespace Stremio.Input
                 buttons |= reading.Buttons;
                 if (direction == null)
                 {
-                    direction = GetDirection(reading);
+                    direction = GetDirection(reading, StickMovesHighlight);
                 }
             }
         }
 
-        // D-pad only: on Xbox the left stick already moves the console's mouse-mode cursor.
-        private static Key GetDirection(GamepadReading reading)
+        private static Key GetDirection(GamepadReading reading, bool useStick)
         {
             if ((reading.Buttons & GamepadButtons.DPadUp) != 0) return ArrowUp;
             if ((reading.Buttons & GamepadButtons.DPadDown) != 0) return ArrowDown;
             if ((reading.Buttons & GamepadButtons.DPadLeft) != 0) return ArrowLeft;
             if ((reading.Buttons & GamepadButtons.DPadRight) != 0) return ArrowRight;
-            return null;
+            if (!useStick)
+            {
+                return null;
+            }
+            var x = reading.LeftThumbstickX;
+            var y = reading.LeftThumbstickY;
+            if (Math.Abs(x) < StickThreshold && Math.Abs(y) < StickThreshold)
+            {
+                return null;
+            }
+            if (Math.Abs(y) >= Math.Abs(x))
+            {
+                return y > 0 ? ArrowUp : ArrowDown;
+            }
+            return x > 0 ? ArrowRight : ArrowLeft;
         }
 
         private sealed class Key

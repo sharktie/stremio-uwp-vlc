@@ -48,6 +48,8 @@ namespace Stremio
                 "PrivateNetworkAccessRespectPreflightResults,LocalNetworkAccessChecks");
 
             this.InitializeComponent();
+            // Xbox: no mouse-mode pointer; the controller drives the page's highlight (ControllerBridge).
+            this.RequiresPointerMode = ApplicationRequiresPointerMode.WhenRequested;
             this.Suspending += OnSuspending;
         }
 

@@ -31,7 +31,9 @@ namespace Stremio
         private ShellHost _shell;
         private BuiltInStreamingServer _streamingServer;
         private ControllerBridge _controller;
+        private readonly DispatcherTimer _toastTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(4) };
         private ulong _appNavigationId;
+        private bool _pointerOn;
         private bool _videoViewRequested;
         private bool _videoViewStarting;
 
@@ -53,6 +55,15 @@ namespace Stremio
                 {
                     VideoView.Opacity = visible ? 1 : 0;
                 }
+            };
+            // The controller drives the page's highlight; the console's mouse-mode cursor would only
+            // get in the way. The View button turns it on when it's needed (SetPointerMode).
+            RequiresPointer = RequiresPointer.Never;
+            WebView.RequiresPointer = RequiresPointer.Never;
+            _toastTimer.Tick += (s, e) =>
+            {
+                _toastTimer.Stop();
+                ToastPanel.Visibility = Visibility.Collapsed;
             };
             PreviewKeyDown += OnPreviewKeyDown;
             Loaded += OnLoaded;
@@ -159,9 +170,38 @@ namespace Stremio
                 Log.Error("Injecting the controller script failed", ex);
             }
             _controller = new ControllerBridge(core, RequestTextAsync, EnsureWebViewFocus);
+            if (AnalyticsInfo.VersionInfo.DeviceFamily == "Windows.Xbox")
+            {
+                _controller.ViewPressed += () => SetPointerMode(!_pointerOn);
+            }
             _controller.EmulatePageFocus();
             core.Navigate(WebAppUri.AbsoluteUri);
             WebView.Focus(FocusState.Programmatic);
+        }
+
+        // Xbox: turns the console's cursor on or off. Off, the D-pad and left stick move the page's
+        // highlight; on, the left stick moves the cursor and A clicks under it, for anything the
+        // highlight can't reach.
+        private void SetPointerMode(bool enabled)
+        {
+            _pointerOn = enabled;
+            Log.Write("Cursor " + (enabled ? "on" : "off"));
+            var mode = enabled ? RequiresPointer.WhenFocused : RequiresPointer.Never;
+            RequiresPointer = mode;
+            WebView.RequiresPointer = mode;
+            _controller.StickMovesHighlight = !enabled;
+            var ignored = WebView.CoreWebView2?.ExecuteScriptAsync(ControllerBridge.SetPagePointerScript(enabled));
+            ShowToast(enabled
+                ? "Cursor on: the left stick moves it and A clicks. Press View to turn it off."
+                : "Cursor off: use the D-pad or left stick. Press View to turn it back on.");
+        }
+
+        private void ShowToast(string message)
+        {
+            ToastText.Text = message;
+            ToastPanel.Visibility = Visibility.Visible;
+            _toastTimer.Stop();
+            _toastTimer.Start();
         }
 
         private void EnsureWebViewFocus()
@@ -327,6 +367,11 @@ namespace Stremio
                 {
                     _controller.Paused = false;
                     _controller.EmulatePageFocus();
+                }
+                if (_pointerOn)
+                {
+                    // The page script starts with the cursor hidden; keep it on after a reload.
+                    var ignored = sender.ExecuteScriptAsync(ControllerBridge.SetPagePointerScript(true));
                 }
                 CreateVideoView();
             }
