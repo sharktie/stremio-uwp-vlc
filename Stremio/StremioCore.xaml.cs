@@ -163,6 +163,7 @@ namespace Stremio
                 if (AnalyticsInfo.VersionInfo.DeviceFamily == "Windows.Xbox")
                 {
                     await core.AddScriptToExecuteOnDocumentCreatedAsync(ControllerBridge.XboxPageScript);
+                    await core.AddScriptToExecuteOnDocumentCreatedAsync(ControllerBridge.XboxNavigationScript);
                 }
             }
             catch (Exception ex)

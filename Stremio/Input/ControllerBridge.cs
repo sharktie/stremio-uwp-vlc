@@ -99,6 +99,165 @@ namespace Stremio.Input
     (document.head || document.documentElement).appendChild(style);
 })();";
 
+        /// <summary>
+        /// Xbox only, run before the page's scripts. TV-style focus navigation for the arrow keys the
+        /// D-pad and left stick send, modelled on Nuvio UWP's focus.js. stremio-web's own keyboard
+        /// navigation (a spatial-navigation polyfill) scrolls the page instead of moving to rows that
+        /// aren't fully visible and skips the many buttons marked tabIndex -1, such as the sidebar.
+        /// The highlighted element carries the uwp-focused class. In the player the arrow keys stay
+        /// Stremio's (seek and volume) unless one of its menus is open.
+        /// </summary>
+        public const string XboxNavigationScript = @"(function () {
+    if (window.top !== window) return;
+    var SELECTOR = 'a[href], button, input, textarea, select, [tabindex], [role=""button""], [role=""link""], [role=""option""], [role=""menuitem""], [role=""tab""]';
+    var TEXT = /^(text|search|email|url|password|tel|number)$/i;
+    var DIRECTIONS = { ArrowUp: 'up', ArrowDown: 'down', ArrowLeft: 'left', ArrowRight: 'right' };
+    var SIDEBAR = '[class*=""vertical-nav-bar""]';
+    var lastContent = null;
+
+    function inPlayer() { return location.hash.indexOf('#/player') === 0; }
+    function isText(el) { return !!el && (el.tagName === 'TEXTAREA' || (el.tagName === 'INPUT' && TEXT.test(el.type || 'text'))); }
+    function shown(el) {
+        if (!el || !el.isConnected || el.closest('[hidden], [aria-hidden=""true""], [inert]')) return false;
+        var r = el.getBoundingClientRect();
+        return r.width > 0 && r.height > 0 && getComputedStyle(el).visibility !== 'hidden';
+    }
+    function usable(el) {
+        if (el.disabled || el.closest('[data-focus-guard]') || !shown(el)) return false;
+        var r = el.getBoundingClientRect();
+        // Skip tiny elements and focusable page-sized wrappers.
+        return r.width >= 4 && r.height >= 4 && r.width * r.height < window.innerWidth * window.innerHeight * 0.6;
+    }
+    function inView(el) {
+        var r = el.getBoundingClientRect();
+        return r.bottom > 0 && r.top < window.innerHeight && r.right > 0 && r.left < window.innerWidth;
+    }
+    // Where the highlight may go: an open dialog, popup menu or player menu, otherwise the page.
+    function scope() {
+        var modals = document.querySelectorAll('.modals-container');
+        for (var i = modals.length - 1; i >= 0; i--) if (modals[i].lastElementChild) return modals[i].lastElementChild;
+        var menus = document.querySelectorAll('[class*=""portal-menu""], [class*=""label-container""] [class*=""menu-container""]');
+        for (var j = menus.length - 1; j >= 0; j--) if (shown(menus[j])) return menus[j];
+        if (inPlayer()) {
+            var layers = document.querySelectorAll('[class*=""menu-layer""], [class*=""side-drawer-layer""]');
+            for (var k = layers.length - 1; k >= 0; k--) if (shown(layers[k])) return layers[k];
+        }
+        return document.body;
+    }
+    function candidates(root) {
+        var all = root.querySelectorAll(SELECTOR), list = [];
+        for (var i = 0; i < all.length; i++) if (all[i] !== root && usable(all[i])) list.push(all[i]);
+        // The clickable thing itself rather than a focusable wrapper around it. The list is in
+        // document order, so an element has a candidate inside it exactly when the next one is.
+        return list.filter(function (el, index) {
+            return !(index + 1 < list.length && el.contains(list[index + 1]));
+        });
+    }
+    function gap(a1, a2, b1, b2) { return b2 < a1 ? a1 - b2 : (b1 > a2 ? b1 - a2 : 0); }
+    // Nuvio's findNext: the nearest element beyond this one's edge, staying in line first.
+    function findNext(from, dir, list) {
+        var a = from.getBoundingClientRect(), ax = a.left + a.width / 2, ay = a.top + a.height / 2;
+        var best = null, bestScore = Infinity;
+        for (var i = 0; i < list.length; i++) {
+            var el = list[i];
+            if (el === from || el.contains(from) || from.contains(el)) continue;
+            var b = el.getBoundingClientRect(), bx = b.left + b.width / 2, by = b.top + b.height / 2;
+            var sx = Math.min(a.width, b.width) * 0.25, sy = Math.min(a.height, b.height) * 0.25, primary, secondary;
+            if (dir === 'right') { if (b.left < a.right - sx || bx <= ax) continue; primary = Math.max(0, b.left - a.right); secondary = gap(a.top, a.bottom, b.top, b.bottom); }
+            else if (dir === 'left') { if (b.right > a.left + sx || bx >= ax) continue; primary = Math.max(0, a.left - b.right); secondary = gap(a.top, a.bottom, b.top, b.bottom); }
+            else if (dir === 'down') { if (b.top < a.bottom - sy || by <= ay) continue; primary = Math.max(0, b.top - a.bottom); secondary = gap(a.left, a.right, b.left, b.right); }
+            else { if (b.bottom > a.top + sy || by >= ay) continue; primary = Math.max(0, a.top - b.bottom); secondary = gap(a.left, a.right, b.left, b.right); }
+            var horizontal = dir === 'left' || dir === 'right';
+            var score = primary + secondary * (horizontal ? 6 : 2) + (horizontal ? Math.abs(by - ay) : Math.abs(bx - ax)) * 0.25;
+            if (score < bestScore) { bestScore = score; best = el; }
+        }
+        return best;
+    }
+    function first(list) {
+        var visible = list.filter(inView);
+        var content = visible.filter(function (el) { return !el.closest('[class*=""nav-bar""]'); });
+        var pool = content.length ? content : (visible.length ? visible : list);
+        pool.sort(function (x, y) {
+            var a = x.getBoundingClientRect(), b = y.getBoundingClientRect();
+            return (a.top - b.top) || (a.left - b.left);
+        });
+        return pool[0];
+    }
+    function mark(el) {
+        var previous = document.querySelectorAll('.uwp-focused');
+        for (var i = 0; i < previous.length; i++) if (previous[i] !== el) previous[i].classList.remove('uwp-focused');
+        el.classList.add('uwp-focused');
+        if (!el.closest(SIDEBAR)) lastContent = el;
+    }
+    function focusOn(el, scroll) {
+        mark(el);
+        if (isText(el)) {
+            // Text boxes take real focus only once typed into (ControllerBridge opens a keyboard for
+            // them on A); focusing one would pop up the console's keyboard straight away.
+            if (document.activeElement && document.activeElement !== document.body) document.activeElement.blur();
+        } else {
+            try { el.focus({ preventScroll: true }); } catch (e) {}
+        }
+        if (scroll) {
+            try { el.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'smooth' }); } catch (e) {}
+        }
+    }
+    function current(root) {
+        var el = document.querySelector('.uwp-focused');
+        return el && root.contains(el) && usable(el) ? el : null;
+    }
+    function move(dir, root) {
+        var list = candidates(root);
+        if (!list.length) return;
+        var from = current(root);
+        if (!from) { focusOn(first(list), true); return; }
+        var next = null;
+        // Back out of the sidebar to the card you left.
+        if (dir === 'right' && from.closest(SIDEBAR) && lastContent && root.contains(lastContent) && usable(lastContent) && inView(lastContent)) next = lastContent;
+        if (!next) next = findNext(from, dir, list);
+        if (next) focusOn(next, true);
+    }
+
+    window.addEventListener('keydown', function (e) {
+        var dir = DIRECTIONS[e.key];
+        if (!dir || e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
+        var root = scope();
+        if (inPlayer() && root === document.body) return; // the player's own keys: seek and volume
+        if (isText(document.activeElement) && (dir === 'left' || dir === 'right')) return; // move the caret
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        move(dir, root);
+    }, true);
+
+    // Keep the highlight on whatever the page itself focuses (e.g. the password box after the email).
+    document.addEventListener('focusin', function (e) {
+        var t = e.target;
+        if (t && t !== document.body && t.matches && t.matches(SELECTOR)) mark(t);
+    }, true);
+
+    // Screens fill in as data arrives; whenever nothing has the highlight, give it to the first
+    // thing on screen so there's always something to move from (not in the player).
+    var pending = 0;
+    function ensureHighlight() {
+        pending = 0;
+        if (inPlayer() || !document.body) return;
+        var root = scope();
+        if (current(root)) return;
+        var list = candidates(root);
+        if (list.length) focusOn(first(list), false);
+    }
+    function schedule() { if (!pending) pending = setTimeout(ensureHighlight, 150); }
+    window.addEventListener('hashchange', schedule);
+    document.addEventListener('DOMContentLoaded', function () {
+        new MutationObserver(schedule).observe(document.body, { childList: true, subtree: true });
+        schedule();
+    });
+
+    var style = document.createElement('style');
+    style.textContent = '.uwp-focused { outline: 3px solid #ffffff !important; outline-offset: -3px !important; }';
+    (document.head || document.documentElement).appendChild(style);
+})();";
+
         /// <summary>Script that turns the page's handling of the console's cursor on or off.</summary>
         public static string SetPagePointerScript(bool enabled)
         {
@@ -107,12 +266,23 @@ namespace Stremio.Input
 
         private const string AllowEscapeScript = "window.__uwpAllowEscape = Date.now();";
 
+        private const string ClickTargetScript = @"(function () {
+    var el = document.querySelector('[data-uwp-click-target]');
+    if (!el) return false;
+    el.removeAttribute('data-uwp-click-target');
+    el.click();
+    return true;
+})()";
+
         // Describes the focused element and whether a menu or the player is open. A focused text
         // box is tagged so the typed text can be put back into the same element afterwards.
         private const string PageStateScript = @"(function () {
-    var old = document.querySelectorAll('[data-uwp-text-target]');
-    for (var i = 0; i < old.length; i++) old[i].removeAttribute('data-uwp-text-target');
-    var el = document.activeElement, state = { editable: false, overlay: false, player: location.hash.indexOf('#/player') === 0 };
+    var old = document.querySelectorAll('[data-uwp-text-target], [data-uwp-click-target]');
+    for (var i = 0; i < old.length; i++) { old[i].removeAttribute('data-uwp-text-target'); old[i].removeAttribute('data-uwp-click-target'); }
+    // On Xbox the highlight (XboxNavigationScript) decides; text boxes are highlighted without focus.
+    var marked = document.querySelector('.uwp-focused');
+    if (marked && (!marked.isConnected || !marked.getClientRects().length)) marked = null;
+    var el = marked || document.activeElement, state = { editable: false, overlay: false, player: location.hash.indexOf('#/player') === 0 };
     if (el && !el.disabled && !el.readOnly && (el.tagName === 'TEXTAREA' ||
         (el.tagName === 'INPUT' && /^(text|email|password|search|url|tel|number)$/i.test(el.type || 'text')))) {
         state.editable = true;
@@ -120,6 +290,10 @@ namespace Stremio.Input
         state.label = el.getAttribute('placeholder') || el.getAttribute('aria-label') || '';
         state.value = state.type === 'password' ? '' : String(el.value || '');
         el.setAttribute('data-uwp-text-target', '1');
+    } else if (marked && marked !== document.activeElement) {
+        // Highlighted but not focusable, so Enter wouldn't reach it: click it instead.
+        state.needsClick = true;
+        marked.setAttribute('data-uwp-click-target', '1');
     }
     var modals = document.querySelectorAll('.modals-container');
     for (var j = 0; j < modals.length; j++) if (modals[j].children.length > 0) state.overlay = true;
@@ -156,6 +330,8 @@ namespace Stremio.Input
         private static readonly Key Enter = new Key("Enter", "Enter", 13, "\r");
         private static readonly Key Escape = new Key("Escape", "Escape", 27, null);
         private static readonly Key Space = new Key(" ", "Space", 32, " ");
+        private static readonly Key SubtitlesMenuKey = new Key("s", "KeyS", 83, "s");
+        private static readonly Key AudioMenuKey = new Key("a", "KeyA", 65, "a");
 
         private const string FocusDiagnosticsScript = @"(function () {
     var el = document.activeElement;
@@ -263,7 +439,15 @@ namespace Stremio.Input
             }
             else if ((pressed & GamepadButtons.X) != 0)
             {
-                OnPlayPause();
+                OnPlayerKey(Space);
+            }
+            else if ((pressed & GamepadButtons.Y) != 0)
+            {
+                OnPlayerKey(SubtitlesMenuKey);
+            }
+            else if ((pressed & GamepadButtons.Menu) != 0)
+            {
+                OnPlayerKey(AudioMenuKey);
             }
             else if ((pressed & GamepadButtons.View) != 0)
             {
@@ -305,7 +489,14 @@ namespace Stremio.Input
                 }
                 if (boxes == 0 && !cursorOn)
                 {
-                    await PressAsync(Enter);
+                    if (state != null && state.GetNamedBoolean("needsClick", false))
+                    {
+                        await _webView.ExecuteScriptAsync(ClickTargetScript);
+                    }
+                    else
+                    {
+                        await PressAsync(Enter);
+                    }
                 }
             }
             catch (Exception ex)
@@ -351,8 +542,9 @@ namespace Stremio.Input
             }
         }
 
-        // X: play / pause in the player (stremio-web's Space shortcut).
-        private async void OnPlayPause()
+        // Player shortcuts (stremio-web's keyboard ones): X play / pause (Space), Y subtitles menu (S),
+        // Menu audio menu (A).
+        private async void OnPlayerKey(Key key)
         {
             _busy = true;
             try
@@ -360,12 +552,12 @@ namespace Stremio.Input
                 var state = await GetPageStateAsync();
                 if (state != null && state.GetNamedBoolean("player", false) && !state.GetNamedBoolean("editable", false))
                 {
-                    await PressAsync(Space);
+                    await PressAsync(key);
                 }
             }
             catch (Exception ex)
             {
-                Log.Error("Controller play/pause failed", ex);
+                Log.Error("Controller player shortcut failed", ex);
             }
             finally
             {
