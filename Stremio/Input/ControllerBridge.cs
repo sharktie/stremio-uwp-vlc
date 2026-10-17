@@ -68,6 +68,15 @@ namespace Stremio.Input
         /// </summary>
         public const string XboxPageScript = @"(function () {
     if (window.top !== window) return;
+    // Runs before the page is parsed, when there's no <html> element yet: anything that needs it
+    // waits until it exists.
+    function whenRoot(fn) {
+        if (document.documentElement) { fn(); return; }
+        var observer = new MutationObserver(function () {
+            if (document.documentElement) { observer.disconnect(); fn(); }
+        });
+        observer.observe(document, { childList: true });
+    }
     var block = function (e) { e.preventDefault(); e.stopImmediatePropagation(); };
     window.addEventListener('keydown', function (e) {
         if (e.key === 'BrowserBack' || e.key === 'BrowserForward') return block(e);
@@ -83,11 +92,12 @@ namespace Stremio.Input
     // page can't switch off. Unless the user turned the cursor on (View button), hide it and drop
     // its input before Stremio sees it, so A doesn't also click whatever is under it. Clicks from
     // code (el.click()) aren't trusted and clicks from Enter on a link have detail 0; both still work.
-    document.documentElement.classList.add('uwp-no-pointer');
+    window.__uwpNoPointer = true;
+    whenRoot(function () { document.documentElement.classList.toggle('uwp-no-pointer', window.__uwpNoPointer); });
     ['pointerdown', 'pointerup', 'pointermove', 'mousedown', 'mouseup', 'mousemove',
         'click', 'dblclick', 'auxclick', 'contextmenu', 'wheel'].forEach(function (type) {
         window.addEventListener(type, function (e) {
-            if (!e.isTrusted || !document.documentElement.classList.contains('uwp-no-pointer')) return;
+            if (!e.isTrusted || !window.__uwpNoPointer) return;
             if (type === 'click' && e.detail === 0) return;
             block(e);
         }, { capture: true, passive: false });
@@ -96,7 +106,7 @@ namespace Stremio.Input
     style.textContent = '[class*=""horizontal-nav-bar""] [class*=""buttons-container""] > [class*=""button-container""]' +
         ':not([class*=""menu-button-container""]):not([class*=""back-button-container""]) { visibility: hidden !important; }' +
         ' html.uwp-no-pointer, html.uwp-no-pointer * { cursor: none !important; }';
-    (document.head || document.documentElement).appendChild(style);
+    whenRoot(function () { (document.head || document.documentElement).appendChild(style); });
 })();";
 
         /// <summary>
@@ -115,6 +125,16 @@ namespace Stremio.Input
     var SIDEBAR = '[class*=""vertical-nav-bar""]';
     var lastContent = null;
     var reports = 0;
+    var userMoved = false;
+    // Runs before the page is parsed, when there's no <html> element yet: anything that needs it
+    // waits until it exists.
+    function whenRoot(fn) {
+        if (document.documentElement) { fn(); return; }
+        var observer = new MutationObserver(function () {
+            if (document.documentElement) { observer.disconnect(); fn(); }
+        });
+        observer.observe(document, { childList: true });
+    }
 
     // The first moves go to the app's log (stremio-vlc.log), to diagnose navigation on the console.
     function describe(el) {
@@ -228,7 +248,16 @@ namespace Stremio.Input
         var next = null;
         // Back out of the sidebar to the card you left.
         if (dir === 'right' && from.closest(SIDEBAR) && lastContent && root.contains(lastContent) && usable(lastContent) && inView(lastContent)) next = lastContent;
-        if (!next) next = findNext(from, dir, list);
+        if (!next) {
+            // Up and down stay on their side: the sidebar is entered and left with left and right,
+            // so going down past the last row doesn't jump into it.
+            var pool = list;
+            if (dir === 'up' || dir === 'down') {
+                var inSidebar = !!from.closest(SIDEBAR);
+                pool = list.filter(function (el) { return !!el.closest(SIDEBAR) === inSidebar; });
+            }
+            next = findNext(from, dir, pool);
+        }
         var detail = '';
         if (!next && dir === 'left') {
             var side = document.querySelectorAll(SIDEBAR + ' a');
@@ -256,6 +285,7 @@ namespace Stremio.Input
         if (isText(document.activeElement) && (dir === 'left' || dir === 'right')) return; // move the caret
         e.preventDefault();
         e.stopImmediatePropagation();
+        userMoved = true;
         move(dir, root);
     }, true);
 
@@ -272,26 +302,32 @@ namespace Stremio.Input
         pending = 0;
         if (inPlayer() || !document.body) return;
         var root = scope();
-        if (current(root)) return;
+        var now = current(root);
+        // Keep the user's place; before they've moved, trade a start spot in the top bar or sidebar
+        // for the first poster once the screen's content has loaded.
+        if (now && (userMoved || !now.closest('[class*=""nav-bar""]'))) return;
         var list = candidates(root);
-        if (list.length) focusOn(first(list), false);
+        var target = list.length ? first(list) : null;
+        if (target && target !== now) focusOn(target, false);
     }
     function schedule() { if (!pending) pending = setTimeout(ensureHighlight, 150); }
-    window.addEventListener('hashchange', schedule);
+    window.addEventListener('hashchange', function () { userMoved = false; schedule(); });
     document.addEventListener('DOMContentLoaded', function () {
         new MutationObserver(schedule).observe(document.body, { childList: true, subtree: true });
         schedule();
     });
 
+    // Posters already get Stremio's own highlight around the artwork.
     var style = document.createElement('style');
-    style.textContent = '.uwp-focused { outline: 3px solid #ffffff !important; outline-offset: -3px !important; }';
-    (document.head || document.documentElement).appendChild(style);
+    style.textContent = '.uwp-focused:not([class*=""meta-item-link""]) { outline: 3px solid #ffffff !important; outline-offset: -3px !important; }';
+    whenRoot(function () { (document.head || document.documentElement).appendChild(style); });
 })();";
 
         /// <summary>Script that turns the page's handling of the console's cursor on or off.</summary>
         public static string SetPagePointerScript(bool enabled)
         {
-            return "document.documentElement.classList.toggle('uwp-no-pointer', " + (enabled ? "false" : "true") + ");";
+            var off = enabled ? "false" : "true";
+            return "window.__uwpNoPointer = " + off + "; document.documentElement.classList.toggle('uwp-no-pointer', " + off + ");";
         }
 
         private const string AllowEscapeScript = "window.__uwpAllowEscape = Date.now();";
