@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Threading.Tasks;
 using Microsoft.Web.WebView2.Core;
 using Stremio.Diagnostics;
@@ -63,8 +63,9 @@ namespace Stremio.Input
         /// <summary>
         /// Xbox only, run before the page's scripts. One press of B must go back exactly once, and
         /// ControllerBridge handles B, so drop the browser's own back actions (the console also
-        /// turns B into browser back) and any Escape the bridge didn't send. Also hides the nav bar's
-        /// fullscreen button, which does nothing on a console that is always full screen.
+        /// turns B into browser back) and any Escape the bridge didn't send. Also hides the fullscreen
+        /// buttons, which do nothing on a console that is always full screen, and the player's volume
+        /// controls.
         /// </summary>
         public const string XboxPageScript = @"(function () {
     if (window.top !== window) return;
@@ -105,6 +106,9 @@ namespace Stremio.Input
     var style = document.createElement('style');
     style.textContent = '[class*=""horizontal-nav-bar""] [class*=""buttons-container""] > [class*=""button-container""]' +
         ':not([class*=""menu-button-container""]):not([class*=""back-button-container""]) { visibility: hidden !important; }' +
+        // The player's fullscreen button, and its volume slider and mute button: the TV does volume.
+        ' [class*=""player-actions""] [title*=""ullscreen""], [class*=""control-bar-buttons-container""] > [class*=""volume-slider""],' +
+        ' [class*=""control-bar-buttons-container""] > :has(+ [class*=""volume-slider""]) { display: none !important; }' +
         ' html.uwp-no-pointer, html.uwp-no-pointer * { cursor: none !important; }';
     whenRoot(function () { (document.head || document.documentElement).appendChild(style); });
 })();";
@@ -114,8 +118,9 @@ namespace Stremio.Input
         /// D-pad and left stick send, modelled on Nuvio UWP's focus.js. stremio-web's own keyboard
         /// navigation (a spatial-navigation polyfill) scrolls the page instead of moving to rows that
         /// aren't fully visible and skips the many buttons marked tabIndex -1, such as the sidebar.
-        /// The highlighted element carries the uwp-focused class. In the player the arrow keys stay
-        /// Stremio's (seek and volume) unless one of its menus is open.
+        /// The highlighted element carries the uwp-focused class. The player works like Nuvio's: with
+        /// its controls hidden left/right seek and A pauses; with them up the D-pad moves along the
+        /// progress bar and buttons.
         /// </summary>
         public const string XboxNavigationScript = @"(function () {
     if (window.top !== window) return;
@@ -302,6 +307,89 @@ namespace Stremio.Input
         if (next) focusOn(next, true);
     }
 
+    // The player, like Nuvio's. Controls hidden: left/right seek (Stremio's own keys), A pauses and
+    // up/down bring the controls up on play/pause. Controls up: the D-pad moves along the back
+    // button, progress bar and buttons, left/right on the progress bar seek, A presses the button
+    // (pauses on the progress bar) and B hides them. Each press keeps them up; Stremio hides them
+    // 3 seconds after the last. Its menus (subtitles, audio...) are navigated like any other.
+    var PLAYER = '[class*=""player-container""]';
+    var SEEK = '[class*=""seek-bar-container""] [class*=""slider-container""]';
+    // The bar's buttons (control-bar-button-*, not the control-bar-buttons-* containers).
+    var BUTTON = '[class*=""control-bar-buttons-container""] :is([class^=""control-bar-button-""], [class*="" control-bar-button-""])';
+    var CONTROLS = '[class*=""player-nav""] > [class*=""player-button""], ' + SEEK + ', ' + BUTTON + ':not(.disabled), [class*=""control-bar-buttons-menu-button""]';
+    // Whether VLC is paused, from the shell's property updates (Stremio keeps the controls up while
+    // paused, so B can't hide them then).
+    var playerPaused = false;
+    try {
+        window.chrome.webview.addEventListener('message', function (e) {
+            try {
+                var message = typeof e.data === 'string' ? JSON.parse(e.data) : e.data;
+                var args = message && message.args;
+                if (args && args[0] === 'mpv-prop-change' && args[1] && args[1].name === 'pause') playerPaused = !!args[1].data;
+            } catch (x) {}
+        });
+    } catch (e) {}
+    function player() { return inPlayer() ? document.querySelector(PLAYER) : null; }
+    function controlsShown(p) { return !/overlayHidden/.test(p.className); }
+    // Stremio shows its controls on mouse movement over the player and hides them when the mouse
+    // leaves; these events come from code, so XboxPageScript lets them through.
+    function showControls(p) { p.dispatchEvent(new MouseEvent('mousemove', { bubbles: true })); }
+    function hideControls(p) { p.dispatchEvent(new MouseEvent('mouseout', { bubbles: true, relatedTarget: null })); }
+    function playerTargets(p) {
+        var all = p.querySelectorAll(CONTROLS), list = [];
+        for (var i = 0; i < all.length; i++) if (usable(all[i])) list.push(all[i]);
+        return list;
+    }
+    function playButton(p) { return p.querySelector(BUTTON); }
+    function playerMove(dir, p) {
+        var list = playerTargets(p);
+        var from = current(document.body);
+        if (!controlsShown(p) || list.indexOf(from) < 0) {
+            if (dir === 'left' || dir === 'right') {
+                var bar = p.querySelector(SEEK);
+                if (bar) mark(bar);
+                return false;
+            }
+            showControls(p);
+            var play = playButton(p);
+            if (play) focusOn(play, false);
+            report('player ' + dir + ': controls up on ' + describe(play));
+            return true;
+        }
+        showControls(p);
+        var horizontal = dir === 'left' || dir === 'right';
+        if (horizontal && from.matches(SEEK)) return false;
+        // Left and right stay on their row: the progress bar sits just above the buttons.
+        var a = from.getBoundingClientRect();
+        var next = dir === 'down' && from.matches(SEEK) ? playButton(p) : findNext(from, dir, !horizontal ? list : list.filter(function (el) {
+            var b = el.getBoundingClientRect();
+            return b.top < a.bottom && b.bottom > a.top;
+        }));
+        report('player ' + dir + ': ' + describe(from) + ' -> ' + describe(next));
+        if (next) focusOn(next, false);
+        return true;
+    }
+    // A in the player (ControllerBridge): true when handled here, i.e. play / pause.
+    window.__uwpPlayerSelect = function () {
+        var p = player();
+        if (!p || scope() !== document.body) return false;
+        var from = current(document.body);
+        var shown = controlsShown(p) && playerTargets(p).indexOf(from) >= 0;
+        showControls(p);
+        if (shown && !from.matches(SEEK)) return false;
+        var play = playButton(p);
+        if (play) play.click();
+        if (!shown && play) focusOn(play, false);
+        return true;
+    };
+    // B in the player: true when it only hid the controls; otherwise B leaves the player.
+    window.__uwpPlayerBack = function () {
+        var p = player();
+        if (!p || scope() !== document.body || !controlsShown(p) || playerPaused) return false;
+        hideControls(p);
+        return true;
+    };
+
     // Y on the controller: highlight the search box (ControllerBridge then opens the keyboard). Pages
     // without one go to Stremio's search page first.
     window.__uwpGoToSearch = function () {
@@ -315,7 +403,11 @@ namespace Stremio.Input
         var dir = DIRECTIONS[e.key];
         if (!dir || e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
         var root = scope();
-        if (inPlayer() && root === document.body) return; // the player's own keys: seek and volume
+        if (inPlayer() && root === document.body) {
+            var p = player();
+            if (p && playerMove(dir, p)) { e.preventDefault(); e.stopImmediatePropagation(); }
+            return;
+        }
         if (isText(document.activeElement) && (dir === 'left' || dir === 'right')) return; // move the caret
         e.preventDefault();
         e.stopImmediatePropagation();
@@ -573,7 +665,8 @@ namespace Stremio.Input
             }
         }
 
-        // A: activate the focused element, or type into a focused text box. With the console's cursor
+        // A: activate the focused element, or type into a focused text box; in the player, play / pause
+        // unless one of its buttons is highlighted (__uwpPlayerSelect). With the console's cursor
         // on, A already clicks under the cursor, so only the text box part applies.
         private async void OnSelect(bool cursorOn)
         {
@@ -628,6 +721,11 @@ namespace Stremio.Input
         private async Task SelectAsync(bool cursorOn)
         {
             var state = await GetPageStateAsync();
+            if (!cursorOn && state != null && state.GetNamedBoolean("player", false) && !state.GetNamedBoolean("overlay", false) &&
+                (await _webView.ExecuteScriptAsync("window.__uwpPlayerSelect ? window.__uwpPlayerSelect() : false")) == "true")
+            {
+                return;
+            }
             var boxes = 0;
             while (state != null && state.GetNamedBoolean("editable", false) && boxes < MaxChainedTextBoxes)
             {
@@ -665,7 +763,8 @@ namespace Stremio.Input
             }
         }
 
-        // B: close the open menu, otherwise go back one page (out of the player: to the stream list).
+        // B: close the open menu; in the player hide its controls, then leave it (back to the stream list);
+        // otherwise go back one page.
         private async void OnBack()
         {
             _busy = true;
@@ -681,6 +780,11 @@ namespace Stremio.Input
                     Log.Write("Controller back: closing the open menu");
                     await _webView.ExecuteScriptAsync(AllowEscapeScript);
                     await PressAsync(Escape);
+                }
+                else if (state.GetNamedBoolean("player", false) &&
+                    (await _webView.ExecuteScriptAsync("window.__uwpPlayerBack ? window.__uwpPlayerBack() : false")) == "true")
+                {
+                    Log.Write("Controller back: hiding the player controls");
                 }
                 else if (_webView.CanGoBack)
                 {
