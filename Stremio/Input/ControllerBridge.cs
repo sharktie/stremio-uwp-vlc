@@ -470,7 +470,7 @@ namespace Stremio.Input
         private bool _busy;
         private int _loggedPresses;
 
-        /// <param name="ensureFocus">Gives the web view keyboard focus if something else has it.</param>
+        /// <param name="ensureFocus">Puts keyboard focus where it belongs before a key press (see MainPage.EnsureControllerFocus).</param>
         public ControllerBridge(CoreWebView2 webView, Func<TextEntryRequest, Task<TextEntryResult>> requestText, Action ensureFocus)
         {
             _webView = webView;

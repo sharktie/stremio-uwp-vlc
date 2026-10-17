@@ -24,6 +24,11 @@
         <!-- The controller drives the page as a keyboard (see ControllerBridge). -->
         <controls:WebView2 x:Name="WebView" />
 
+        <!-- Xbox: holds keyboard focus while the controller drives the page (see EnsureControllerFocus). -->
+        <ContentControl x:Name="FocusSink" Width="1" Height="1" Opacity="0" IsTabStop="True"
+                        UseSystemFocusVisuals="False" IsHitTestVisible="False"
+                        HorizontalAlignment="Left" VerticalAlignment="Top" />
+
         <Border x:Name="ToastPanel" Visibility="Collapsed" IsHitTestVisible="False"
                 HorizontalAlignment="Center" VerticalAlignment="Bottom" Margin="24,0,24,72"
                 Padding="20,12" CornerRadius="8" Background="#E6181624">

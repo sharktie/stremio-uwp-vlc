@@ -26,6 +26,8 @@ namespace Stremio
     public sealed partial class MainPage : Page
     {
         private static readonly Uri WebAppUri = new Uri("https://web.stremio.com/");
+        private static readonly bool IsXbox = AnalyticsInfo.VersionInfo.DeviceFamily == "Windows.Xbox";
+        private const int FocusLogLimit = 5;
 
         private readonly VlcShellPlayer _player;
         private ShellHost _shell;
@@ -36,6 +38,7 @@ namespace Stremio
         private bool _pointerOn;
         private bool _videoViewRequested;
         private bool _videoViewStarting;
+        private int _focusLogs;
 
         public MainPage()
         {
@@ -60,6 +63,7 @@ namespace Stremio
             // get in the way. The View button turns it on when it's needed (SetPointerMode).
             RequiresPointer = RequiresPointer.Never;
             WebView.RequiresPointer = RequiresPointer.Never;
+            WebView.GotFocus += OnWebViewGotFocus;
             _toastTimer.Tick += (s, e) =>
             {
                 _toastTimer.Stop();
@@ -160,7 +164,7 @@ namespace Stremio
             try
             {
                 await core.AddScriptToExecuteOnDocumentCreatedAsync(ControllerBridge.HideGamepadApiScript);
-                if (AnalyticsInfo.VersionInfo.DeviceFamily == "Windows.Xbox")
+                if (IsXbox)
                 {
                     await core.AddScriptToExecuteOnDocumentCreatedAsync(ControllerBridge.XboxPageScript);
                     await core.AddScriptToExecuteOnDocumentCreatedAsync(ControllerBridge.XboxNavigationScript);
@@ -170,14 +174,14 @@ namespace Stremio
             {
                 Log.Error("Injecting the controller script failed", ex);
             }
-            _controller = new ControllerBridge(core, RequestTextAsync, EnsureWebViewFocus);
-            if (AnalyticsInfo.VersionInfo.DeviceFamily == "Windows.Xbox")
+            _controller = new ControllerBridge(core, RequestTextAsync, EnsureControllerFocus);
+            if (IsXbox)
             {
                 _controller.ViewPressed += () => SetPointerMode(!_pointerOn);
             }
             _controller.EmulatePageFocus();
             core.Navigate(WebAppUri.AbsoluteUri);
-            WebView.Focus(FocusState.Programmatic);
+            EnsureControllerFocus();
         }
 
         // Xbox: turns the console's cursor on or off. Off, the D-pad and left stick move the page's
@@ -191,6 +195,7 @@ namespace Stremio
             RequiresPointer = mode;
             WebView.RequiresPointer = mode;
             _controller.StickMovesHighlight = !enabled;
+            EnsureControllerFocus();
             var ignored = WebView.CoreWebView2?.ExecuteScriptAsync(ControllerBridge.SetPagePointerScript(enabled));
             ShowToast(enabled
                 ? "Cursor on: the left stick moves it and A clicks. Press View to turn it off."
@@ -205,10 +210,30 @@ namespace Stremio
             _toastTimer.Start();
         }
 
-        private void EnsureWebViewFocus()
+        // On Xbox with the cursor off, keyboard focus stays off the web view. When the web view gets
+        // focus it hands the browser the console's own focus, and from then on the browser also moves
+        // around the page with the controller (the left stick especially), on top of ControllerBridge:
+        // every push moved twice once the search keyboard had closed and given the web view focus
+        // back. ControllerBridge's key presses reach the page without focus. With the cursor on, the
+        // web view needs focus for the console's mouse mode; elsewhere it needs it for the keyboard.
+        private bool KeepFocusOffWebView
+        {
+            get { return IsXbox && !_pointerOn; }
+        }
+
+        private void EnsureControllerFocus()
         {
             if (LoadErrorPanel.Visibility != Visibility.Collapsed)
             {
+                return;
+            }
+            if (KeepFocusOffWebView)
+            {
+                if (FocusManager.GetFocusedElement() != FocusSink && !FocusSink.Focus(FocusState.Programmatic) && _focusLogs < FocusLogLimit)
+                {
+                    _focusLogs++;
+                    Log.Write("Couldn't move focus off the web view");
+                }
                 return;
             }
             for (var element = FocusManager.GetFocusedElement() as DependencyObject; element != null; element = VisualTreeHelper.GetParent(element))
@@ -220,6 +245,21 @@ namespace Stremio
             }
             Log.Write("Giving the web view focus back");
             WebView.Focus(FocusState.Programmatic);
+        }
+
+        private void OnWebViewGotFocus(object sender, RoutedEventArgs e)
+        {
+            if (!KeepFocusOffWebView)
+            {
+                return;
+            }
+            if (_focusLogs < FocusLogLimit)
+            {
+                _focusLogs++;
+                Log.Write("Web view took focus; moving it off the browser");
+            }
+            // Not from inside the focus change itself.
+            var ignored = Dispatcher.RunAsync(CoreDispatcherPriority.Normal, EnsureControllerFocus);
         }
 
         // Lets the user type into a text box in the page with the console's on-screen keyboard,
@@ -272,7 +312,7 @@ namespace Stremio
             };
 
             var result = await dialog.ShowAsync();
-            WebView.Focus(FocusState.Programmatic);
+            EnsureControllerFocus();
             if (result != ContentDialogResult.Primary && !submitted)
             {
                 return null;
@@ -369,6 +409,7 @@ namespace Stremio
                     _controller.Paused = false;
                     _controller.EmulatePageFocus();
                 }
+                EnsureControllerFocus();
                 if (_pointerOn)
                 {
                     // The page script starts with the cursor hidden; keep it on after a reload.
