@@ -123,9 +123,25 @@ namespace Stremio.Input
     var TEXT = /^(text|search|email|url|password|tel|number)$/i;
     var DIRECTIONS = { ArrowUp: 'up', ArrowDown: 'down', ArrowLeft: 'left', ArrowRight: 'right' };
     var SIDEBAR = '[class*=""vertical-nav-bar""]';
+    // The top bar and sidebar. Not just any class with nav-bar in it: the Home screen's whole content
+    // sits in a main-nav-bars-container.
+    var NAV = '[class*=""horizontal-nav-bar""], [class*=""vertical-nav-bar""]';
+    // Things not worth stopping on with a controller: genre and cast links, the IMDb link, a
+    // poster's menu and dismiss X, the search bar's submit button (A on the box already searches)
+    // and the episode filter box.
+    var SKIP = '[class*=""meta-links""], [class*=""imdb-button""], [class*=""dismiss-icon""], [class*=""meta-item-container""] [class*=""menu-label-container""], ' +
+        '[class*=""search-bar""] [class*=""submit-button""], [class*=""videos-list""] [class*=""search-bar""]';
+    // Where a screen's highlight starts: a title's first episode or stream, else the first poster.
+    var START = ['[class*=""videos-container""]', '[class*=""streams-container""]', '[class*=""meta-item-container""]'];
     var lastContent = null;
     var reports = 0;
     var userMoved = false;
+    var ownFocus = false;
+    var highlighted = null;
+    // The page element to go back to when a menu or dialog closes, and per screen the title the
+    // highlight was on when it was left, to come back to it.
+    var pagePlace = null;
+    var places = {};
     // Runs before the page is parsed, when there's no <html> element yet: anything that needs it
     // waits until it exists.
     function whenRoot(fn) {
@@ -136,7 +152,7 @@ namespace Stremio.Input
         observer.observe(document, { childList: true });
     }
 
-    // The first moves go to the app's log (stremio-vlc.log), to diagnose navigation on the console.
+    // The first moves and start spots go to the app's log (stremio-vlc.log), to diagnose navigation on the console.
     function describe(el) {
         if (!el) return 'nothing';
         var r = el.getBoundingClientRect();
@@ -144,7 +160,7 @@ namespace Stremio.Input
             ' @' + [Math.round(r.left), Math.round(r.top), Math.round(r.width), Math.round(r.height)].join(',');
     }
     function report(text) {
-        if (reports >= 40) return;
+        if (reports >= 80) return;
         reports++;
         try { window.chrome.webview.postMessage(JSON.stringify({ uwpLog: text })); } catch (e) {}
     }
@@ -180,7 +196,7 @@ namespace Stremio.Input
     }
     function candidates(root) {
         var all = root.querySelectorAll(SELECTOR), list = [];
-        for (var i = 0; i < all.length; i++) if (all[i] !== root && usable(all[i])) list.push(all[i]);
+        for (var i = 0; i < all.length; i++) if (all[i] !== root && !all[i].closest(SKIP) && usable(all[i])) list.push(all[i]);
         // The clickable thing itself rather than a focusable wrapper around it. The list is in
         // document order, so an element has a candidate inside it exactly when the next one is.
         return list.filter(function (el, index) {
@@ -209,8 +225,12 @@ namespace Stremio.Input
     }
     function first(list) {
         var visible = list.filter(inView);
-        var content = visible.filter(function (el) { return !el.closest('[class*=""nav-bar""]'); });
+        var content = visible.filter(function (el) { return !el.closest(NAV); });
         var pool = content.length ? content : (visible.length ? visible : list);
+        for (var i = 0; i < START.length; i++) {
+            var preferred = pool.filter(function (el) { return !!el.closest(START[i]); });
+            if (preferred.length) { pool = preferred; break; }
+        }
         pool.sort(function (x, y) {
             var a = x.getBoundingClientRect(), b = y.getBoundingClientRect();
             return (a.top - b.top) || (a.left - b.left);
@@ -221,7 +241,19 @@ namespace Stremio.Input
         var previous = document.querySelectorAll('.uwp-focused');
         for (var i = 0; i < previous.length; i++) if (previous[i] !== el) previous[i].classList.remove('uwp-focused');
         el.classList.add('uwp-focused');
+        highlighted = el;
         if (!el.closest(SIDEBAR)) lastContent = el;
+        if (scope() === document.body) pagePlace = el;
+    }
+    // What identifies an element across visits to a screen.
+    function key(el) {
+        return el.getAttribute('href') || (el.tagName + ':' + (el.getAttribute('title') || (el.textContent || '').trim().slice(0, 80)));
+    }
+    function remembered(list) {
+        var place = places[location.hash];
+        if (!place) return null;
+        for (var i = 0; i < list.length; i++) if (key(list[i]) === place) return list[i];
+        return null;
     }
     function focusOn(el, scroll) {
         mark(el);
@@ -230,7 +262,9 @@ namespace Stremio.Input
             // them on A); focusing one would pop up the console's keyboard straight away.
             if (document.activeElement && document.activeElement !== document.body) document.activeElement.blur();
         } else {
+            ownFocus = true;
             try { el.focus({ preventScroll: true }); } catch (e) {}
+            ownFocus = false;
         }
         if (scroll) {
             try { el.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'smooth' }); } catch (e) {}
@@ -244,7 +278,7 @@ namespace Stremio.Input
         var list = candidates(root);
         if (!list.length) return;
         var from = current(root);
-        if (!from) { focusOn(first(list), true); return; }
+        if (!from) { focusOn(root === document.body && pagePlace && usable(pagePlace) ? pagePlace : first(list), true); return; }
         var next = null;
         // Back out of the sidebar to the card you left.
         if (dir === 'right' && from.closest(SIDEBAR) && lastContent && root.contains(lastContent) && usable(lastContent) && inView(lastContent)) next = lastContent;
@@ -271,8 +305,8 @@ namespace Stremio.Input
     // Y on the controller: highlight the search box (ControllerBridge then opens the keyboard). Pages
     // without one go to Stremio's search page first.
     window.__uwpGoToSearch = function () {
-        var input = document.querySelector('[class*=""search-bar""] input, input[class*=""search-input""]');
-        if (input && usable(input)) { focusOn(input, true); return 'found'; }
+        var input = document.querySelector('[class*=""horizontal-nav-bar""] [class*=""search-bar""] input');
+        if (input && usable(input)) { userMoved = true; focusOn(input, true); return 'found'; }
         location.hash = '#/search';
         return 'navigated';
     };
@@ -292,26 +326,43 @@ namespace Stremio.Input
     // Keep the highlight on whatever the page itself focuses (e.g. the password box after the email).
     document.addEventListener('focusin', function (e) {
         var t = e.target;
-        if (t && t !== document.body && t.matches && t.matches(SELECTOR)) mark(t);
+        if (ownFocus || !t || t === document.body || !t.matches || !t.matches(SELECTOR)) return;
+        mark(t);
+        userMoved = true;
     }, true);
 
-    // Screens fill in as data arrives; whenever nothing has the highlight, give it to the first
-    // thing on screen so there's always something to move from (not in the player).
+    // Screens fill in as data arrives. Until the user moves, the highlight follows: back to the
+    // title they opened when returning to a screen, otherwise its first episode, stream or poster.
+    // After that it stays put, and when a menu or dialog closes it goes back where it was.
     var pending = 0;
     function ensureHighlight() {
         pending = 0;
         if (inPlayer() || !document.body) return;
         var root = scope();
         var now = current(root);
-        // Keep the user's place; before they've moved, trade a start spot in the top bar or sidebar
-        // for the first poster once the screen's content has loaded.
-        if (now && (userMoved || !now.closest('[class*=""nav-bar""]'))) return;
+        if (now && userMoved) return;
         var list = candidates(root);
-        var target = list.length ? first(list) : null;
-        if (target && target !== now) focusOn(target, false);
+        if (!list.length) return;
+        var target = null, scroll = false;
+        if (root === document.body) {
+            if (!now && pagePlace && usable(pagePlace)) target = pagePlace;
+            else target = remembered(list);
+            scroll = !!target;
+        }
+        target = target || first(list);
+        if (target && target !== now) {
+            report('start: ' + location.hash.slice(0, 40) + ' ' + describe(target));
+            focusOn(target, scroll);
+        }
     }
     function schedule() { if (!pending) pending = setTimeout(ensureHighlight, 150); }
-    window.addEventListener('hashchange', function () { userMoved = false; schedule(); });
+    window.addEventListener('hashchange', function (e) {
+        var at = e.oldURL.indexOf('#');
+        places[at < 0 ? '' : e.oldURL.slice(at)] = pagePlace && !pagePlace.closest(NAV) ? key(pagePlace) : null;
+        pagePlace = null;
+        userMoved = false;
+        schedule();
+    });
     document.addEventListener('DOMContentLoaded', function () {
         new MutationObserver(schedule).observe(document.body, { childList: true, subtree: true });
         schedule();
